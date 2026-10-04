@@ -95,6 +95,10 @@ npm start            # http://localhost:4200 ，/api 代理到 8080
    - 确认 `CONFIRMED`：把被抵销的开放债权标记为 `SETTLED` 并回填批次号；
      pass-through 分组的债权保持开放；重复确认返回 409；
    - 模拟付款 `PAID_SIMULATED`：只给实付腿打付款时间戳，**不接银行**。
+     支持两种方式且结果一致：**一键**登记全部剩余实付腿，或在已确认批次上
+     **逐腿**登记单条正金额腿（零金额抵销备忘录腿不可操作，返回 409；
+     重复登记已付腿为幂等空操作，不改写原时间戳）；页面实时显示
+     已付/待付腿进度，全部实付腿完成后批次才进入 `PAID_SIMULATED`。
 
 ## 主要 API
 
@@ -104,7 +108,8 @@ npm start            # http://localhost:4200 ，/api 代理到 8080
 | POST | `/api/batches/simulate` | 生成试算批次（不动债权） |
 | GET | `/api/batches` `/api/batches/{id}` | 批次列表 / 详情（含腿、逐笔追溯、排除） |
 | POST | `/api/batches/{id}/confirm` | 确认方案 |
-| POST | `/api/batches/{id}/pay-simulated` | 模拟付款 |
+| POST | `/api/batches/{id}/pay-simulated` | 一键模拟付款（全部剩余实付腿） |
+| POST | `/api/batches/{id}/legs/{legId}/pay-simulated` | 逐腿模拟付款（仅已确认批次的正金额腿） |
 
 ## 数据表（PostgreSQL，金额一律 `DECIMAL`，绝不用浮点）
 
@@ -127,4 +132,8 @@ cd backend && ./mvnw clean test
 - `ClearingApplicationTests`（Spring 全栈）：在演示数据上验证
   `NA-CNY` 缩减、`NA-NOFF` 保留、`NA-XCCY` 尾差、
   确认后原债权状态变化、pass-through 债权仍开放、
-  模拟付款打标、重复确认冲突。
+  模拟付款打标、重复确认冲突；
+- `LegPaymentAcceptanceTests`（Spring 全栈）：逐腿模拟付款——
+  两条现金腿先付一条批次仍为 `CONFIRMED`、付齐后才进入 `PAID_SIMULATED`、
+  备忘录腿/未知腿拒绝、`SIMULATED` 状态付款被拒且原发票不受影响、
+  重复付款不改写时间戳、一键与逐腿两种入口终态一致。

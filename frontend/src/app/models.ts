@@ -98,6 +98,8 @@ export interface BatchGroup {
   roundingDiffTotal: number;
   roundingResidual: number;
   roundingBearerCode: string;
+  payableLegCount: number;
+  paidLegCount: number;
   legs: BatchLeg[];
   exclusions: Exclusion[];
 }
@@ -116,6 +118,8 @@ export interface Batch {
   createdAt: string;
   confirmedAt?: string;
   paidSimulatedAt?: string;
+  payableLegCount: number;
+  paidLegCount: number;
   note?: string;
   groups: BatchGroup[];
 }

@@ -171,6 +171,12 @@ public class ClearingController {
         return toBatchJson(batchService.getBatch(id));
     }
 
+    @PostMapping("/batches/{id}/legs/{legId}/pay-simulated")
+    public Map<String, Object> payLegSimulated(@PathVariable String id, @PathVariable String legId) {
+        batchService.markLegPaidSimulated(id, legId);
+        return toBatchJson(batchService.getBatch(id));
+    }
+
     // ---------------- projection ----------------
 
     private Map<String, Object> toBatchJson(NettingBatch b) {
@@ -190,6 +196,8 @@ public class ClearingController {
         m.put("paidSimulatedAt", nv(b.getPaidSimulatedAt()));
         m.put("note", nv(b.getNote()));
 
+        int payableLegs = 0;
+        int paidLegs = 0;
         List<Map<String, Object>> groups = new ArrayList<>();
         for (BatchGroup g : b.getGroups()) {
             Map<String, Object> gm = new LinkedHashMap<>();
@@ -207,8 +215,16 @@ public class ClearingController {
             gm.put("roundingResidual", g.getRoundingResidual());
             gm.put("roundingBearerCode", nv(g.getRoundingBearerCode()));
 
+            int groupPayable = 0;
+            int groupPaid = 0;
             List<Map<String, Object>> legs = new ArrayList<>();
             for (BatchLeg leg : g.getLegs()) {
+                if (leg.getAmount().signum() > 0) {
+                    groupPayable++;
+                    if (leg.getPaidSimulatedAt() != null) {
+                        groupPaid++;
+                    }
+                }
                 Map<String, Object> lm = new LinkedHashMap<>();
                 lm.put("id", leg.getId());
                 lm.put("payerCode", leg.getPayerCode());
@@ -225,6 +241,10 @@ public class ClearingController {
                 legs.add(lm);
             }
             gm.put("legs", legs);
+            gm.put("payableLegCount", groupPayable);
+            gm.put("paidLegCount", groupPaid);
+            payableLegs += groupPayable;
+            paidLegs += groupPaid;
 
             gm.put("exclusions", g.getExclusions().stream().map(ex -> {
                 Map<String, Object> em = new LinkedHashMap<>();
@@ -238,6 +258,8 @@ public class ClearingController {
             groups.add(gm);
         }
         m.put("groups", groups);
+        m.put("payableLegCount", payableLegs);
+        m.put("paidLegCount", paidLegs);
         return m;
     }
 

@@ -254,6 +254,65 @@ public class BatchService {
     }
 
     /**
+     * Registers the simulated payment of one single cash leg — the classroom
+     * alternative to {@link #markPaidSimulated(String)}. Only positive-amount
+     * legs of a CONFIRMED batch can be paid; zero-amount set-off memos carry no
+     * cash and are rejected. Re-paying an already paid leg is an idempotent
+     * no-op so the original timestamp is never rewritten. The batch flips to
+     * PAID_SIMULATED only once every cash leg is paid; until then it stays
+     * CONFIRMED. Still no bank channel: only a simulated timestamp is written.
+     */
+    @Transactional
+    public NettingBatch markLegPaidSimulated(String batchId, String legId) {
+        NettingBatch batch = batchRepository.findById(batchId)
+                .orElseThrow(() -> new NoSuchElementException("batch not found: " + batchId));
+        BatchLeg leg = findLeg(batch, legId);
+        if (leg == null) {
+            throw new NoSuchElementException("leg not found in batch " + batchId + ": " + legId);
+        }
+        if (leg.getAmount().signum() <= 0) {
+            throw new IllegalStateException("leg " + legId
+                    + " is a zero-amount set-off memo; there is no payment to register");
+        }
+        if (leg.getPaidSimulatedAt() != null) {
+            // Idempotent: a paid leg keeps its original timestamp.
+            return batch;
+        }
+        if (batch.getStatus() != BatchStatus.CONFIRMED) {
+            throw new IllegalStateException("only legs of a CONFIRMED batch can be paid"
+                    + " (simulated); current=" + batch.getStatus());
+        }
+        OffsetDateTime at = OffsetDateTime.now(ZoneOffset.UTC);
+        leg.markPaidSimulated(at);
+        if (allCashLegsPaid(batch)) {
+            batch.markPaidSimulated(at);
+        }
+        return batch;
+    }
+
+    private BatchLeg findLeg(NettingBatch batch, String legId) {
+        for (BatchGroup g : batch.getGroups()) {
+            for (BatchLeg leg : g.getLegs()) {
+                if (leg.getId().equals(legId)) {
+                    return leg;
+                }
+            }
+        }
+        return null;
+    }
+
+    private boolean allCashLegsPaid(NettingBatch batch) {
+        for (BatchGroup g : batch.getGroups()) {
+            for (BatchLeg leg : g.getLegs()) {
+                if (leg.getAmount().signum() > 0 && leg.getPaidSimulatedAt() == null) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    /**
      * Loads the whole batch graph inside one transaction and initializes every lazy
      * collection level by level (Hibernate cannot eagerly fetch two bags at once).
      */

@@ -2,7 +2,7 @@ import { Component, OnInit } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { ClearingApiService } from './api.service';
-import { Agreement, Batch, BatchGroup, Claim, LegalEntity } from './models';
+import { Agreement, Batch, BatchGroup, BatchLeg, Claim, LegalEntity } from './models';
 import { DebtGraphComponent, SelectedEdge } from './components/debt-graph.component';
 import { TracePanelComponent } from './components/trace-panel.component';
 import { BatchSummaryComponent } from './components/batch-summary.component';
@@ -88,13 +88,23 @@ import { BatchSummaryComponent } from './components/batch-summary.component';
             确认本方案（登记抵销、标记原债权）
           </button>
           <button class="pay" (click)="paySimulated()"
-                  [disabled]="current.status !== 'CONFIRMED' || busy">
+                  [disabled]="current.status !== 'CONFIRMED' || busy"
+                  title="一次性登记全部剩余实付腿的模拟付款">
             模拟付款（仅打标，不发银行）
           </button>
+          <span class="pay-progress" *ngIf="current.payableLegCount">
+            实付腿 {{ current.paidLegCount }}/{{ current.payableLegCount }}
+            <span class="progress"><span class="fill" [style.width.%]="paidPct"></span></span>
+          </span>
           <span class="muted" *ngIf="current.status === 'PAID_SIMULATED'">
             ✓ 已完成模拟付款，无真实资金移动。
           </span>
         </div>
+        <div class="muted hint" *ngIf="current.status === 'CONFIRMED'">
+          可在下方「清算腿明细」中逐腿登记模拟付款：每次只更新选中的实付腿；
+          全部实付腿完成后批次才进入「模拟付款完成」，抵销备忘录腿无需付款。
+        </div>
+        <div class="error-banner" *ngIf="lastError">⚠ {{ lastError }}</div>
 
         <div class="group-tabs">
           <button *ngFor="let g of current.groups; let i = index"
@@ -116,6 +126,7 @@ import { BatchSummaryComponent } from './components/batch-summary.component';
               结算币种 {{ g.settlementCurrency }}；
               毛额 {{ money(g.grossAmount) }}，净应付 {{ money(g.netAmount) }}；
               原始 {{ g.originalLegCount }} 笔 → 现金腿 {{ g.nettedLegCount }} 笔；
+              实付腿已登记 {{ g.paidLegCount }}/{{ g.payableLegCount }}；
               逐笔尾差合计 {{ g.roundingDiffTotal }}（承担人 {{ g.roundingBearerCode || '—' }}）。
             </div>
 
@@ -132,11 +143,11 @@ import { BatchSummaryComponent } from './components/batch-summary.component';
               <tr>
                 <th>#</th><th>类型</th><th>付款方</th><th>收款方</th>
                 <th class="num">金额</th><th class="num">精确值</th>
-                <th>发票数</th><th>模拟付款时间</th>
+                <th>发票数</th><th>模拟付款时间</th><th>逐腿操作</th>
               </tr>
               </thead>
               <tbody>
-              <tr *ngFor="let l of g.legs">
+              <tr *ngFor="let l of g.legs" [class.leg-paid]="l.paidSimulatedAt">
                 <td>{{ l.seqNo }}</td>
                 <td>
                   <span class="tag" [class]="legClass(l)">{{ legText(l) }}</span>
@@ -147,6 +158,22 @@ import { BatchSummaryComponent } from './components/batch-summary.component';
                 <td class="num muted">{{ l.amountExact }}</td>
                 <td>{{ l.items.length }}</td>
                 <td class="muted">{{ l.paidSimulatedAt ? (l.paidSimulatedAt | date: 'MM-dd HH:mm:ss') : '—' }}</td>
+                <td>
+                  <ng-container *ngIf="l.amount > 0; else memoCell">
+                    <span *ngIf="l.paidSimulatedAt" class="good">✓ 已登记</span>
+                    <button *ngIf="!l.paidSimulatedAt" class="pay-leg"
+                            (click)="payLeg(l)"
+                            [disabled]="current.status !== 'CONFIRMED' || busy"
+                            [title]="current.status === 'CONFIRMED'
+                              ? '只登记这一条腿的模拟付款时间戳，不动其他腿'
+                              : '需先确认批次，才能逐腿登记模拟付款'">
+                      逐腿模拟付款
+                    </button>
+                  </ng-container>
+                  <ng-template #memoCell>
+                    <span class="muted" title="零金额抵销备忘录腿只保留追溯信息，没有现金流动">抵销备忘录 · 无需付款</span>
+                  </ng-template>
+                </td>
               </tr>
               </tbody>
             </table>
@@ -190,6 +217,16 @@ import { BatchSummaryComponent } from './components/batch-summary.component';
     .hint { margin-top: 8px; font-size: 12px; }
     table tr.active { background: rgba(56,189,248,.08); }
     .lifecycle { display: flex; gap: 10px; align-items: center; margin: 6px 0 12px; }
+    .pay-progress { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--muted); }
+    .progress { display: inline-block; width: 120px; height: 6px; background: var(--bg);
+                border: 1px solid var(--line); border-radius: 999px; overflow: hidden; vertical-align: middle; }
+    .progress .fill { display: block; height: 100%; background: var(--good); transition: width .3s; }
+    .error-banner { background: rgba(248,113,113,.12); border: 1px solid var(--bad); color: var(--bad);
+                    border-radius: 6px; padding: 8px 12px; margin: 0 0 12px; font-size: 12.5px; }
+    button.pay-leg { padding: 3px 10px; font-size: 12px; background: #b45309; border-color: #d97706; color: #fff; }
+    button.pay-leg:hover:not(:disabled) { color: #fff; border-color: var(--warn); }
+    tr.leg-paid td { background: rgba(52,211,153,.05); }
+    .good { color: var(--good); }
     .group-tabs { display: flex; gap: 6px; flex-wrap: wrap; margin: 8px 0; }
     .group-tabs button.on { background: #0369a1; border-color: #0284c7; color: #fff; }
     .group-meta { margin-bottom: 10px; font-size: 12.5px; }
@@ -221,6 +258,7 @@ export class AppComponent implements OnInit {
   current: Batch | null = null;
   activeGroupId = '';
   selectedEdge: SelectedEdge | null = null;
+  lastError = '';
 
   constructor(private api: ClearingApiService) {}
 
@@ -268,6 +306,7 @@ export class AppComponent implements OnInit {
       this.current = b;
       this.activeGroupId = b.groups[0]?.id ?? '';
       this.selectedEdge = null;
+      this.lastError = '';
     });
   }
 
@@ -285,13 +324,14 @@ export class AppComponent implements OnInit {
       return;
     }
     this.busy = true;
+    this.lastError = '';
     this.api.confirm(this.current.id).subscribe({
       next: (b) => {
         this.busy = false;
         this.patchBatch(b);
         this.api.claims().subscribe((x) => (this.claims = x));
       },
-      error: () => (this.busy = false),
+      error: (err) => this.onActionError(err),
     });
   }
 
@@ -300,13 +340,41 @@ export class AppComponent implements OnInit {
       return;
     }
     this.busy = true;
+    this.lastError = '';
     this.api.paySimulated(this.current.id).subscribe({
       next: (b) => {
         this.busy = false;
         this.patchBatch(b);
       },
-      error: () => (this.busy = false),
+      error: (err) => this.onActionError(err),
     });
+  }
+
+  /** Registers the simulated payment of one single cash leg (classroom mode). */
+  payLeg(l: BatchLeg): void {
+    if (!this.current || this.current.status !== 'CONFIRMED' || l.paidSimulatedAt) {
+      return;
+    }
+    this.busy = true;
+    this.lastError = '';
+    this.api.payLegSimulated(this.current.id, l.id).subscribe({
+      next: (b) => {
+        this.busy = false;
+        this.patchBatch(b);
+      },
+      error: (err) => this.onActionError(err),
+    });
+  }
+
+  get paidPct(): number {
+    return this.current?.payableLegCount
+      ? Math.round((100 * this.current.paidLegCount) / this.current.payableLegCount)
+      : 0;
+  }
+
+  private onActionError(err: { error?: { error?: string } }): void {
+    this.busy = false;
+    this.lastError = err?.error?.error ?? '操作被拒绝，请检查批次状态。';
   }
 
   private patchBatch(b: Batch): void {

@@ -112,6 +112,9 @@ class ClearingApplicationTests {
 
         JsonNode paid = postJson("/api/batches/" + batchId + "/pay-simulated");
         assertThat(paid.get("status").asText()).isEqualTo("PAID_SIMULATED");
+        // One-shot payment registers every payable leg: progress is complete.
+        assertThat(paid.get("payableLegCount").asInt()).isGreaterThan(0);
+        assertThat(paid.get("paidLegCount").asInt()).isEqualTo(paid.get("payableLegCount").asInt());
         boolean atLeastOneSimulatedPayment = false;
         for (JsonNode g : paid.get("groups")) {
             for (JsonNode leg : g.get("legs")) {
