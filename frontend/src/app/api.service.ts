@@ -38,4 +38,8 @@ export class ClearingApiService {
   paySimulated(id: string): Observable<Batch> {
     return this.http.post<Batch>(`${this.base}/batches/${id}/pay-simulated`, {});
   }
+  payLegSimulated(batchId: string, legId: string): Observable<Batch> {
+    return this.http.post<Batch>(
+      `${this.base}/batches/${batchId}/legs/${legId}/pay-simulated`, {});
+  }
 }

@@ -77,6 +77,8 @@ export interface BatchLeg {
   settlementCurrency: string;
   isOriginal: boolean;
   isMemo: boolean;
+  payable: boolean;
+  paid: boolean;
   amountExact?: number;
   residualAdjustment: number;
   seqNo: number;
@@ -116,6 +118,8 @@ export interface Batch {
   createdAt: string;
   confirmedAt?: string;
   paidSimulatedAt?: string;
+  cashLegCount: number;
+  cashLegPaidCount: number;
   note?: string;
   groups: BatchGroup[];
 }

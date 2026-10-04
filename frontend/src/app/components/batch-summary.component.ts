@@ -16,8 +16,12 @@ import { Batch } from '../models';
       <div class="card">
         <div class="muted">状态</div>
         <div><span class="tag" [class]="batch.status">{{ statusText }}</span></div>
+        <div class="muted" *ngIf="batch.status === 'CONFIRMED' && batch.cashLegCount > 0">
+          模拟付款进度 {{ batch.cashLegPaidCount }} / {{ batch.cashLegCount }} 笔
+          <span *ngIf="batch.cashLegPaidCount === 0">（尚未登记）</span>
+        </div>
         <div class="muted" *ngIf="batch.paidSimulatedAt">
-          模拟付款 {{ batch.paidSimulatedAt | date: 'MM-dd HH:mm' }}
+          全部模拟付款完成 {{ batch.paidSimulatedAt | date: 'MM-dd HH:mm' }}
         </div>
       </div>
       <div class="card">

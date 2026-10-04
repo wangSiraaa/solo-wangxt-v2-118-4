@@ -88,13 +88,20 @@ import { BatchSummaryComponent } from './components/batch-summary.component';
             确认本方案（登记抵销、标记原债权）
           </button>
           <button class="pay" (click)="paySimulated()"
-                  [disabled]="current.status !== 'CONFIRMED' || busy">
-            模拟付款（仅打标，不发银行）
+                  [disabled]="current.status !== 'CONFIRMED' || busy"
+                  [title]="current.status === 'CONFIRMED' && remainingLegs() === 0 ? '没有待付款的现金腿' : ''">
+            一键模拟付款（全部现金腿打标，不发银行）
           </button>
+          <span class="muted" *ngIf="current.status === 'CONFIRMED'">
+            模拟付款进度：已完成 <b class="good">{{ current.cashLegPaidCount }}</b> /
+            待完成 <b class="warn">{{ remainingLegs() }}</b>（共 {{ current.cashLegCount }} 笔现金腿；
+            零金额抵销备忘录腿无需付款）。也可在下方腿明细中逐腿登记。
+          </span>
           <span class="muted" *ngIf="current.status === 'PAID_SIMULATED'">
-            ✓ 已完成模拟付款，无真实资金移动。
+            ✓ 已完成全部模拟付款，无真实资金移动。
           </span>
         </div>
+        <div class="error-banner" *ngIf="actionError">{{ actionError }}</div>
 
         <div class="group-tabs">
           <button *ngFor="let g of current.groups; let i = index"
@@ -132,11 +139,11 @@ import { BatchSummaryComponent } from './components/batch-summary.component';
               <tr>
                 <th>#</th><th>类型</th><th>付款方</th><th>收款方</th>
                 <th class="num">金额</th><th class="num">精确值</th>
-                <th>发票数</th><th>模拟付款时间</th>
+                <th>发票数</th><th>付款状态</th><th>模拟付款时间</th><th>操作</th>
               </tr>
               </thead>
               <tbody>
-              <tr *ngFor="let l of g.legs">
+              <tr *ngFor="let l of g.legs" [class.paid-row]="l.paid">
                 <td>{{ l.seqNo }}</td>
                 <td>
                   <span class="tag" [class]="legClass(l)">{{ legText(l) }}</span>
@@ -146,7 +153,26 @@ import { BatchSummaryComponent } from './components/batch-summary.component';
                 <td class="num">{{ money(l.amount) }} {{ l.settlementCurrency }}</td>
                 <td class="num muted">{{ l.amountExact }}</td>
                 <td>{{ l.items.length }}</td>
+                <td>
+                  <span class="tag DONE" *ngIf="l.payable && l.paid">✓ 已完成</span>
+                  <span class="tag TODO" *ngIf="l.payable && !l.paid">待付款</span>
+                  <span class="tag MEMO" *ngIf="!l.payable">无需付款</span>
+                </td>
                 <td class="muted">{{ l.paidSimulatedAt ? (l.paidSimulatedAt | date: 'MM-dd HH:mm:ss') : '—' }}</td>
+                <td>
+                  <button class="leg-pay" *ngIf="l.payable && current.status === 'CONFIRMED' && !l.paid"
+                          (click)="payLeg(l.id)" [disabled]="busy">
+                    模拟付款
+                  </button>
+                  <button class="leg-pay" *ngIf="l.payable && current.status === 'CONFIRMED' && l.paid"
+                          disabled title="已登记的模拟付款时间不会被改写">
+                    已完成
+                  </button>
+                  <span class="muted" *ngIf="l.payable && current.status !== 'CONFIRMED'">—</span>
+                  <span class="muted" *ngIf="!l.payable" title="零金额抵销备忘录腿只是追溯记录，不产生付款">
+                    不可操作
+                  </span>
+                </td>
               </tr>
               </tbody>
             </table>
@@ -202,6 +228,14 @@ import { BatchSummaryComponent } from './components/batch-summary.component';
     .tag.CASH { color: #7dd3fc; border-color: #38bdf8; }
     .tag.MEMO { color: #c4b5fd; border-color: #a78bfa; }
     .tag.LEGORIG { color: #cbd5e1; border-color: #94a3b8; }
+    .tag.DONE { color: var(--good); border-color: var(--good); }
+    .tag.TODO { color: var(--warn); border-color: var(--warn); }
+    .paid-row td { background: rgba(52,211,153,.06); }
+    button.leg-pay { padding: 3px 10px; font-size: 12px; }
+    .error-banner {
+      background: #450a0a; border: 1px solid #b91c1c; color: #fecaca;
+      padding: 6px 12px; border-radius: 6px; font-size: 12.5px; margin: 0 0 12px;
+    }
     .bad { color: var(--bad); }
     .foot { margin-top: 20px; }
   `],
@@ -217,6 +251,7 @@ export class AppComponent implements OnInit {
   note = '';
   loading = false;
   busy = false;
+  actionError = '';
 
   current: Batch | null = null;
   activeGroupId = '';
@@ -252,6 +287,7 @@ export class AppComponent implements OnInit {
 
   runSimulation(): void {
     this.loading = true;
+    this.actionError = '';
     const codes = this.selectedAgreement ? [this.selectedAgreement] : [];
     this.api.simulate(this.valuationDate, codes, this.note).subscribe({
       next: (b) => {
@@ -259,7 +295,10 @@ export class AppComponent implements OnInit {
         this.batches = [b, ...this.batches];
         this.openBatch(b.id);
       },
-      error: () => (this.loading = false),
+      error: (e) => {
+        this.loading = false;
+        this.actionError = backendError(e, '试算失败');
+      },
     });
   }
 
@@ -285,13 +324,17 @@ export class AppComponent implements OnInit {
       return;
     }
     this.busy = true;
+    this.actionError = '';
     this.api.confirm(this.current.id).subscribe({
       next: (b) => {
         this.busy = false;
         this.patchBatch(b);
         this.api.claims().subscribe((x) => (this.claims = x));
       },
-      error: () => (this.busy = false),
+      error: (e) => {
+        this.busy = false;
+        this.actionError = backendError(e, '确认失败');
+      },
     });
   }
 
@@ -300,13 +343,41 @@ export class AppComponent implements OnInit {
       return;
     }
     this.busy = true;
+    this.actionError = '';
     this.api.paySimulated(this.current.id).subscribe({
       next: (b) => {
         this.busy = false;
         this.patchBatch(b);
       },
-      error: () => (this.busy = false),
+      error: (e) => {
+        this.busy = false;
+        this.actionError = backendError(e, '模拟付款被拒绝');
+      },
     });
+  }
+
+  payLeg(legId: string): void {
+    if (!this.current) {
+      return;
+    }
+    this.busy = true;
+    this.actionError = '';
+    this.api.payLegSimulated(this.current.id, legId).subscribe({
+      next: (b) => {
+        this.busy = false;
+        this.patchBatch(b);
+      },
+      error: (e) => {
+        this.busy = false;
+        this.actionError = backendError(e, '单腿模拟付款被拒绝');
+      },
+    });
+  }
+
+  remainingLegs(): number {
+    return this.current
+      ? Math.max(0, this.current.cashLegCount - this.current.cashLegPaidCount)
+      : 0;
   }
 
   private patchBatch(b: Batch): void {
@@ -332,4 +403,9 @@ export class AppComponent implements OnInit {
   money(v: number): string {
     return (v ?? 0).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   }
+}
+
+function backendError(e: { error?: { error?: string } } | null, fallback: string): string {
+  const msg = e?.error?.error;
+  return msg ? `${fallback}：${msg}` : fallback;
 }

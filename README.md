@@ -94,7 +94,17 @@ npm start            # http://localhost:4200 ，/api 代理到 8080
    - 试算 `SIMULATED`：只写批次结果，原始债权一行不改；
    - 确认 `CONFIRMED`：把被抵销的开放债权标记为 `SETTLED` 并回填批次号；
      pass-through 分组的债权保持开放；重复确认返回 409；
-   - 模拟付款 `PAID_SIMULATED`：只给实付腿打付款时间戳，**不接银行**。
+   - 模拟付款 `PAID_SIMULATED`：**只给正金额实付腿逐条打付款时间戳，不接银行**。
+     支持两种入口，结果一致：
+     - **逐腿登记**（课堂演示）：`POST /api/batches/{id}/legs/{legId}/pay-simulated`
+       每次只更新被选中的现金腿；零金额抵销备忘录腿不能付款（409）；
+       批次在全部现金腿完成前保持 `CONFIRMED`，最后一笔完成时才转为
+       `PAID_SIMULATED`（批次完成时间=最后一笔腿时间）；重复登记已完成的腿
+       是幂等 no-op，**不会改写时间戳**；
+     - **一键模拟付款**：`POST /api/batches/{id}/pay-simulated`
+       给全部尚未登记的现金腿一次打标（已登记的保留原时间）。
+     `SIMULATED` 状态下任何付款入口都被拒绝（409）；付款只写模拟标记，
+     不改变确认阶段登记的原发票状态与抵销追溯。
 
 ## 主要 API
 
@@ -104,7 +114,8 @@ npm start            # http://localhost:4200 ，/api 代理到 8080
 | POST | `/api/batches/simulate` | 生成试算批次（不动债权） |
 | GET | `/api/batches` `/api/batches/{id}` | 批次列表 / 详情（含腿、逐笔追溯、排除） |
 | POST | `/api/batches/{id}/confirm` | 确认方案 |
-| POST | `/api/batches/{id}/pay-simulated` | 模拟付款 |
+| POST | `/api/batches/{id}/pay-simulated` | 一键模拟付款（全部现金腿打标） |
+| POST | `/api/batches/{id}/legs/{legId}/pay-simulated` | 单条现金腿逐笔登记模拟付款（完成全部腿后批次才 `PAID_SIMULATED`） |
 
 ## 数据表（PostgreSQL，金额一律 `DECIMAL`，绝不用浮点）
 
@@ -127,4 +138,8 @@ cd backend && ./mvnw clean test
 - `ClearingApplicationTests`（Spring 全栈）：在演示数据上验证
   `NA-CNY` 缩减、`NA-NOFF` 保留、`NA-XCCY` 尾差、
   确认后原债权状态变化、pass-through 债权仍开放、
-  模拟付款打标、重复确认冲突。
+  模拟付款打标、重复确认冲突；另覆盖**逐腿模拟付款**验收：
+  两条现金腿先完成一条时批次仍 `CONFIRMED`、第二条完成后转
+  `PAID_SIMULATED`、重复操作不改写时间、零金额备忘录腿与
+  `SIMULATED` 状态付款被拒绝、原发票追溯不受影响，
+  以及逐腿与一键两种入口结果一致。

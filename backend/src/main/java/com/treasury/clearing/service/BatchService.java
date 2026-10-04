@@ -233,6 +233,11 @@ public class BatchService {
         return batch;
     }
 
+    /**
+     * One-click simulated settlement: stamps every still-unpaid positive leg at once.
+     * Legs already stamped (e.g. registered individually earlier) keep their original
+     * timestamp, and the batch completion time is the last leg's stamp.
+     */
     @Transactional
     public NettingBatch markPaidSimulated(String batchId) {
         NettingBatch batch = batchRepository.findById(batchId)
@@ -241,16 +246,85 @@ public class BatchService {
             throw new IllegalStateException(
                     "only a CONFIRMED batch can enter simulated payment; current=" + batch.getStatus());
         }
-        OffsetDateTime at = OffsetDateTime.now(ZoneOffset.UTC);
+        OffsetDateTime last = null;
+        for (BatchLeg leg : cashLegs(batch)) {
+            if (leg.getPaidSimulatedAt() == null) {
+                OffsetDateTime at = OffsetDateTime.now(ZoneOffset.UTC);
+                leg.markPaidSimulated(at);
+            }
+            last = leg.getPaidSimulatedAt();
+        }
+        completeIfAllPaid(batch, last != null ? last : OffsetDateTime.now(ZoneOffset.UTC));
+        return batch;
+    }
+
+    /**
+     * Registers a single positive cash leg as paid in the classroom flow.
+     * Only the selected leg is stamped; zero-amount set-off memo legs cannot be paid.
+     * The batch stays CONFIRMED until every positive leg across all its groups is done;
+     * the last registration flips it to PAID_SIMULATED. Paying an already-paid leg is
+     * a no-op (its timestamp is never rewritten). Still a simulated marker — no bank.
+     */
+    @Transactional
+    public NettingBatch markLegPaidSimulated(String batchId, String legId) {
+        NettingBatch batch = batchRepository.findById(batchId)
+                .orElseThrow(() -> new NoSuchElementException("batch not found: " + batchId));
+        if (batch.getStatus() != BatchStatus.CONFIRMED) {
+            throw new IllegalStateException(
+                    "only a CONFIRMED batch can register simulated payment; current="
+                            + batch.getStatus());
+        }
+        BatchLeg leg = findLeg(batch, legId);
+        if (leg.getAmount().signum() <= 0) {
+            throw new IllegalArgumentException(
+                    "leg " + legId + " is a zero-amount set-off memo, not a payable cash leg");
+        }
+        if (leg.getPaidSimulatedAt() == null) {
+            leg.markPaidSimulated(OffsetDateTime.now(ZoneOffset.UTC));
+        }
+        completeIfAllPaid(batch, leg.getPaidSimulatedAt());
+        return batch;
+    }
+
+    /** Flips the batch to PAID_SIMULATED only once every positive leg carries a stamp. */
+    private void completeIfAllPaid(NettingBatch batch, OffsetDateTime at) {
+        if (batch.getStatus() == BatchStatus.PAID_SIMULATED) {
+            return;
+        }
+        List<BatchLeg> cashLegs = cashLegs(batch);
+        boolean allPaid = cashLegs.stream().allMatch(l -> l.getPaidSimulatedAt() != null);
+        if (allPaid) {
+            // Completion time is the last registration (batch with no cash legs: the click).
+            OffsetDateTime lastAt = cashLegs.isEmpty() ? at : cashLegs.stream()
+                    .map(BatchLeg::getPaidSimulatedAt)
+                    .max(OffsetDateTime::compareTo)
+                    .orElse(at);
+            batch.markPaidSimulated(lastAt);
+        }
+    }
+
+    private List<BatchLeg> cashLegs(NettingBatch batch) {
+        List<BatchLeg> out = new ArrayList<>();
         for (BatchGroup g : batch.getGroups()) {
             for (BatchLeg leg : g.getLegs()) {
-                if (leg.getAmount().signum() > 0 && leg.getPaidSimulatedAt() == null) {
-                    leg.markPaidSimulated(at);
+                // Zero-amount set-off memos are trace records, not payments.
+                if (leg.getAmount().signum() > 0) {
+                    out.add(leg);
                 }
             }
         }
-        batch.markPaidSimulated(at);
-        return batch;
+        return out;
+    }
+
+    private BatchLeg findLeg(NettingBatch batch, String legId) {
+        for (BatchGroup g : batch.getGroups()) {
+            for (BatchLeg leg : g.getLegs()) {
+                if (leg.getId().equals(legId)) {
+                    return leg;
+                }
+            }
+        }
+        throw new NoSuchElementException("leg not found in batch " + batch.getId() + ": " + legId);
     }
 
     /**

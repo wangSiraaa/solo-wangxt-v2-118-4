@@ -171,6 +171,13 @@ public class ClearingController {
         return toBatchJson(batchService.getBatch(id));
     }
 
+    @PostMapping("/batches/{id}/legs/{legId}/pay-simulated")
+    public Map<String, Object> payLegSimulated(@PathVariable String id,
+                                               @PathVariable String legId) {
+        batchService.markLegPaidSimulated(id, legId);
+        return toBatchJson(batchService.getBatch(id));
+    }
+
     // ---------------- projection ----------------
 
     private Map<String, Object> toBatchJson(NettingBatch b) {
@@ -189,6 +196,21 @@ public class ClearingController {
         m.put("confirmedAt", nv(b.getConfirmedAt()));
         m.put("paidSimulatedAt", nv(b.getPaidSimulatedAt()));
         m.put("note", nv(b.getNote()));
+
+        int cashLegTotal = 0;
+        int cashLegPaid = 0;
+        for (BatchGroup gx : b.getGroups()) {
+            for (BatchLeg lx : gx.getLegs()) {
+                if (lx.getAmount().signum() > 0) {
+                    cashLegTotal++;
+                    if (lx.getPaidSimulatedAt() != null) {
+                        cashLegPaid++;
+                    }
+                }
+            }
+        }
+        m.put("cashLegCount", cashLegTotal);
+        m.put("cashLegPaidCount", cashLegPaid);
 
         List<Map<String, Object>> groups = new ArrayList<>();
         for (BatchGroup g : b.getGroups()) {
@@ -217,6 +239,8 @@ public class ClearingController {
                 lm.put("settlementCurrency", leg.getSettlementCurrency());
                 lm.put("isOriginal", leg.isOriginal());
                 lm.put("isMemo", leg.getAmount().signum() == 0 && !leg.isOriginal());
+                lm.put("payable", leg.getAmount().signum() > 0);
+                lm.put("paid", leg.getPaidSimulatedAt() != null);
                 lm.put("amountExact", nv(leg.getAmountExact()));
                 lm.put("residualAdjustment", leg.getResidualAdjustment());
                 lm.put("seqNo", leg.getSeqNo());

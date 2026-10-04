@@ -2,10 +2,12 @@ package com.treasury.clearing;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.web.servlet.MockMvc;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -14,6 +16,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import java.time.LocalDate;
+import java.util.List;
 
 /**
  * Full-stack acceptance on the seeded dataset:
@@ -29,7 +32,30 @@ class ClearingApplicationTests {
 
     @Autowired
     private MockMvc mockMvc;
+    @Autowired
+    private JdbcTemplate jdbc;
     private final ObjectMapper json = new ObjectMapper();
+
+    /**
+     * The shared in-memory database accumulates state across tests (confirmation settles
+     * claims), so reset every batch graph and restore the seeded claim statuses first.
+     */
+    @BeforeEach
+    void resetSeedState() {
+        jdbc.update("DELETE FROM leg_item");
+        jdbc.update("DELETE FROM batch_exclusion");
+        jdbc.update("DELETE FROM batch_leg");
+        jdbc.update("DELETE FROM batch_group");
+        jdbc.update("DELETE FROM netting_batch");
+        resetClaimStatuses();
+    }
+
+    /** Reopens the seeded claims so a second simulation within a test sees them fresh. */
+    private void resetClaimStatuses() {
+        jdbc.update("UPDATE claim SET offset_batch_id = NULL, status = 'OPEN'");
+        jdbc.update("UPDATE claim SET status = 'PLEDGED' WHERE id = 'CLM-EX-001'");
+        jdbc.update("UPDATE claim SET status = 'DISPUTED' WHERE id = 'CLM-EX-002'");
+    }
 
     @Test
     void fullAcceptanceScenario() throws Exception {
@@ -128,8 +154,178 @@ class ClearingApplicationTests {
                 .andExpect(status().isConflict());
     }
 
+    /**
+     * Leg-by-leg simulated payment on NA-CNY (exactly 2 cash legs):
+     * the batch stays CONFIRMED after the first leg, flips only after the second,
+     * memo legs cannot be paid, repeats never rewrite timestamps, and a SIMULATED
+     * batch rejects payment while invoice traceability stays intact.
+     */
+    @Test
+    void perLegSimulatedPaymentProgressAndGuards() throws Exception {
+        JsonNode sim = simulate(LocalDate.of(2026, 9, 30), "NA-CNY");
+        String batchId = sim.get("id").asText();
+        JsonNode cny = group(sim, "NA-CNY");
+
+        List<JsonNode> cashLegs = new java.util.ArrayList<>();
+        JsonNode memoLeg = null;
+        for (JsonNode leg : cny.get("legs")) {
+            if (leg.get("amount").asDouble() > 0) {
+                cashLegs.add(leg);
+            } else if (!leg.get("isOriginal").asBoolean()) {
+                memoLeg = leg;
+            }
+        }
+        assertThat(cashLegs).hasSize(2);
+        assertThat(memoLeg).isNotNull();
+        String leg1 = cashLegs.get(0).get("id").asText();
+        String leg2 = cashLegs.get(1).get("id").asText();
+        String memoId = memoLeg.get("id").asText();
+
+        // Payment is rejected while still SIMULATED (per-leg and one-click alike).
+        mockMvc.perform(post(legPayPath(batchId, leg1)))
+                .andExpect(status().isConflict());
+        mockMvc.perform(post("/api/batches/" + batchId + "/pay-simulated"))
+                .andExpect(status().isConflict());
+
+        JsonNode confirmed = postJson("/api/batches/" + batchId + "/confirm");
+        assertThat(confirmed.get("status").asText()).isEqualTo("CONFIRMED");
+
+        // Zero-amount set-off memo leg cannot be paid.
+        mockMvc.perform(post(legPayPath(batchId, memoId)))
+                .andExpect(status().isConflict());
+
+        // First cash leg: batch remains CONFIRMED, progress 1/2, only that leg stamped.
+        JsonNode afterFirst = postJson(legPayPath(batchId, leg1));
+        assertThat(afterFirst.get("status").asText()).isEqualTo("CONFIRMED");
+        assertThat(afterFirst.get("cashLegCount").asInt()).isEqualTo(2);
+        assertThat(afterFirst.get("cashLegPaidCount").asInt()).isEqualTo(1);
+        assertThat(findLeg(afterFirst, leg1).get("paidSimulatedAt").asText()).isNotBlank();
+        assertThat(findLeg(afterFirst, leg1).get("paid").asBoolean()).isTrue();
+        assertThat(findLeg(afterFirst, leg2).get("paidSimulatedAt").asText()).isEmpty();
+        assertThat(findLeg(afterFirst, memoId).get("payable").asBoolean()).isFalse();
+        String firstStamp = findLeg(afterFirst, leg1).get("paidSimulatedAt").asText();
+
+        // Repeating the completed leg must not rewrite the timestamp.
+        Thread.sleep(10);
+        JsonNode afterRepeat = postJson(legPayPath(batchId, leg1));
+        assertThat(afterRepeat.get("status").asText()).isEqualTo("CONFIRMED");
+        assertThat(afterRepeat.get("cashLegPaidCount").asInt()).isEqualTo(1);
+        assertThat(findLeg(afterRepeat, leg1).get("paidSimulatedAt").asText()).isEqualTo(firstStamp);
+        assertThat(findLeg(afterRepeat, leg2).get("paidSimulatedAt").asText()).isEmpty();
+
+        // Second leg completes the batch.
+        Thread.sleep(10);
+        JsonNode afterSecond = postJson(legPayPath(batchId, leg2));
+        assertThat(afterSecond.get("status").asText()).isEqualTo("PAID_SIMULATED");
+        assertThat(afterSecond.get("cashLegPaidCount").asInt()).isEqualTo(2);
+        assertThat(afterSecond.get("paidSimulatedAt").asText()).isNotBlank();
+        String secondStamp = findLeg(afterSecond, leg2).get("paidSimulatedAt").asText();
+        // The first leg's stamp is untouched; batch completion time is the last leg's.
+        assertThat(findLeg(afterSecond, leg1).get("paidSimulatedAt").asText()).isEqualTo(firstStamp);
+        assertThat(afterSecond.get("paidSimulatedAt").asText()).isEqualTo(secondStamp);
+
+        // Payment after completion is rejected; timestamps still untouched.
+        mockMvc.perform(post(legPayPath(batchId, leg2)))
+                .andExpect(status().isConflict());
+        JsonNode finalBatch = getBatchJson(batchId);
+        assertThat(findLeg(finalBatch, leg1).get("paidSimulatedAt").asText()).isEqualTo(firstStamp);
+        assertThat(findLeg(finalBatch, leg2).get("paidSimulatedAt").asText()).isEqualTo(secondStamp);
+
+        // Original-invoice trace is unaffected: memo legs still carry every ring invoice,
+        // and the confirmed claims remain SETTLED with the batch reference.
+        java.util.Set<String> memoInvoices = new java.util.HashSet<>();
+        for (JsonNode g : finalBatch.get("groups")) {
+            for (JsonNode leg : g.get("legs")) {
+                if (leg.get("amount").asDouble() == 0) {
+                    for (JsonNode it : leg.get("items")) {
+                        memoInvoices.add(it.get("invoiceNo").asText());
+                    }
+                }
+            }
+        }
+        assertThat(memoInvoices).contains(
+                "INV-A-1001", "INV-B-2001", "INV-C-3001",
+                "INV-A-1002", "INV-B-2002", "INV-C-3002");
+        JsonNode claimsAfterPayment = claims();
+        assertThat(findClaim(claimsAfterPayment, "CLM-R1-001").get("status").asText())
+                .isEqualTo("SETTLED");
+        assertThat(findClaim(claimsAfterPayment, "CLM-R1-001").get("offsetBatchId").asText())
+                .isEqualTo(batchId);
+    }
+
+    /** One-click payment and leg-by-leg registration end in the same observable state. */
+    @Test
+    void oneClickAndPerLegPaymentAreEquivalent() throws Exception {
+        // One-click path.
+        JsonNode simA = simulate(LocalDate.of(2026, 9, 30), "NA-CNY");
+        String idA = simA.get("id").asText();
+        postJson("/api/batches/" + idA + "/confirm");
+        JsonNode paidA = postJson("/api/batches/" + idA + "/pay-simulated");
+
+        // Per-leg path. Reopen the seeded claims the first sub-scenario just settled.
+        resetClaimStatuses();
+        JsonNode simB = simulate(LocalDate.of(2026, 9, 30), "NA-CNY");
+        String idB = simB.get("id").asText();
+        postJson("/api/batches/" + idB + "/confirm");
+        List<String> cashLegIds = new java.util.ArrayList<>();
+        for (JsonNode g : getBatchJson(idB).get("groups")) {
+            for (JsonNode leg : g.get("legs")) {
+                if (leg.get("amount").asDouble() > 0) {
+                    cashLegIds.add(leg.get("id").asText());
+                }
+            }
+        }
+        JsonNode b = getBatchJson(idB);
+        for (String legId : cashLegIds) {
+            b = postJson(legPayPath(idB, legId));
+        }
+
+
+        assertThat(paidA.get("status").asText()).isEqualTo("PAID_SIMULATED");
+        assertThat(b.get("status").asText()).isEqualTo("PAID_SIMULATED");
+        assertThat(b.get("cashLegCount").asInt()).isEqualTo(paidA.get("cashLegCount").asInt());
+        assertThat(b.get("cashLegPaidCount").asInt()).isEqualTo(b.get("cashLegCount").asInt());
+        assertThat(b.get("cashLegPaidCount").asInt())
+                .isEqualTo(paidA.get("cashLegPaidCount").asInt());
+        for (JsonNode g : b.get("groups")) {
+            for (JsonNode leg : g.get("legs")) {
+                if (leg.get("amount").asDouble() > 0) {
+                    assertThat(leg.get("paidSimulatedAt").asText()).isNotBlank();
+                }
+            }
+        }
+    }
+
+    private String legPayPath(String batchId, String legId) {
+        return "/api/batches/" + batchId + "/legs/" + legId + "/pay-simulated";
+    }
+
+    private JsonNode getBatchJson(String id) throws Exception {
+        return json.readTree(mockMvc.perform(get("/api/batches/" + id))
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString());
+    }
+
+    private JsonNode findLeg(JsonNode batch, String legId) {
+        for (JsonNode g : batch.get("groups")) {
+            for (JsonNode leg : g.get("legs")) {
+                if (leg.get("id").asText().equals(legId)) {
+                    return leg;
+                }
+            }
+        }
+        throw new AssertionError("leg missing: " + legId);
+    }
+
     private JsonNode simulate(LocalDate date) throws Exception {
+        return simulate(date, null);
+    }
+
+    private JsonNode simulate(LocalDate date, String agreementCode) throws Exception {
         var req = json.createObjectNode().put("valuationDate", date.toString());
+        if (agreementCode != null) {
+            req.putArray("agreementCodes").add(agreementCode);
+        }
         return json.readTree(mockMvc.perform(post("/api/batches/simulate")
                         .contentType("application/json")
                         .content(json.writeValueAsString(req)))
